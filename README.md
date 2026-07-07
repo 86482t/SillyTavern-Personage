@@ -1,15 +1,14 @@
-# Extension-ReactTemplate
-Template repository for SillyTavern extensions using React and Webpack.
+# Personage
 
-## How to use
+SillyTavern extension that displays a clickable age badge on user messages and lets you override the persona age per-chat.
 
-1. Click "Use this template" on the GitHub page.
-2. Create a new repository and clone it to your local machine.
-3. Open the repository in your code editor and run `npm install`.
-4. Edit the `manifest.json` file.
-5. Write the source code in `src` directory.
-6. When you're ready to test - run `npm run build`.
-7. Minimized bundle will appear in `dist`, ready to be plugged into SillyTavern.
+## Usage
 
-> [!TIP]
-> If you want to test your extension live, clone the repo into the `/public/scripts/extensions/third-party` of your SillyTavern installation.
+- The badge shows the detected age from your persona description (supports `N years old`, `N yo`, `N-year-old` patterns).
+- Click the badge to set a per-chat override. The override replaces the age in the rendered persona description at generation time — the AI sees the override without modifying your stored settings.
+- An asterisk (`*`) next to the age means an override is active for this chat.
+- Leave the popup empty and submit to clear the override.
+
+## How it works
+
+The extension hooks `CHAT_COMPLETION_PROMPT_READY` (the final messages array just before the API call). It finds the persona description message by content, replaces the age number at the exact regex match position, and substitutes the full string across all messages.
