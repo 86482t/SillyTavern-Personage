@@ -4,7 +4,7 @@ SillyTavern extension that displays a clickable age badge on user messages and l
 
 ## Usage
 
-- The badge shows the detected age from your persona description (supports `N years old`, `N yo`, `N-year-old` patterns).
+- The badge shows the detected age from your persona description (supports `N years old`, `N yo`, `N-year-old`, `age: N` patterns).
 - Click the badge to set a per-chat override. The override replaces the age in the rendered persona description at generation time — the AI sees the override without modifying your stored settings.
 - An asterisk (`*`) next to the age means an override is active for this chat.
 - Leave the popup empty and submit to clear the override.
