@@ -2,6 +2,7 @@ const BADGE_CLASS = 'persona_age_badge';
 const METADATA_KEY = 'persona_age_override';
 
 const AGE_PATTERNS = [
+    /\bage\s*:\s*(\d+)\b/i,
     /\b(\d+)\s*(?:years?\s*old|year)\b/i,
     /\b(\d+)\s*(?:yo|y\.?\s*o\.?)\b/i,
     /\b(\d+)-year-old\b/i,
