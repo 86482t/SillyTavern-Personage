@@ -8,6 +8,26 @@ const AGE_PATTERNS = [
     /\b(\d+)-year-old\b/i,
 ];
 
+function log(...args) {
+    console.log('[Personage]', ...args);
+}
+
+const seenLogKeys = new Set();
+function logOnce(key, ...args) {
+    if (seenLogKeys.has(key)) return;
+    seenLogKeys.add(key);
+    console.log('[Personage]', ...args);
+}
+
+const lastLogAt = new Map();
+function logThrottled(ms, ...args) {
+    const key = String(args[0] ?? '');
+    const now = Date.now();
+    if (now - (lastLogAt.get(key) || 0) < ms) return;
+    lastLogAt.set(key, now);
+    console.log('[Personage]', ...args);
+}
+
 function stripTemplateTags(text) {
     return text.replace(/\{\{[^}]*\}\}/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -37,7 +57,7 @@ function resolveDefaultPersonaText() {
         text = stripTemplateTags(text);
         return text || null;
     } catch (e) {
-        console.debug('Personage: resolveDefaultPersonaText error', e);
+        console.error('Personage: resolveDefaultPersonaText error', e);
         return null;
     }
 }
@@ -58,62 +78,107 @@ function getResolvedAge() {
     try {
         const ctx = SillyTavern.getContext();
         const override = ctx.chatMetadata?.[METADATA_KEY];
-        if (typeof override === 'number' && override > 0 && override < 200) return { age: override, isOverride: true };
+        if (typeof override === 'number' && override > 0 && override < 200) {
+            logOnce(`override:${override}`, 'resolve: chat override =', override);
+            return { age: override, isOverride: true };
+        }
         if (typeof override === 'string') {
             const n = parseInt(override, 10);
-            if (!isNaN(n) && n > 0 && n < 200) return { age: n, isOverride: true };
+            if (!isNaN(n) && n > 0 && n < 200) {
+                logOnce(`override:${n}`, 'resolve: chat override (string) =', n);
+                return { age: n, isOverride: true };
+            }
         }
         const desc = ctx.powerUserSettings?.persona_description || '';
-        if (!desc) return null;
+        if (!desc) {
+            logOnce('no-desc', 'resolve: no persona_description set');
+            return null;
+        }
         const parsed = parseAgeFromDescription(desc);
-        if (parsed) return { age: parsed, isOverride: false };
+        if (parsed) {
+            logOnce(`parsed:${parsed}`, 'resolve: parsed age from persona_description =', parsed);
+            return { age: parsed, isOverride: false };
+        }
+        logOnce('no-age', 'resolve: no age found in persona_description');
         return null;
     } catch (error) {
-        console.debug('Personage: getResolvedAge error', error);
+        console.error('Personage: getResolvedAge error', error);
         return null;
     }
 }
 
-function replaceAgeInText(text, newAge) {
+function findAgeMatches(text) {
+    const matches = [];
     for (const p of AGE_PATTERNS) {
-        const m = text.match(p);
-        if (m) {
-            const age = parseInt(m[1], 10);
-            if (!isNaN(age) && age > 0 && age < 200) {
-                const numIdx = m.index + m[0].indexOf(m[1]);
-                return text.slice(0, numIdx) + String(newAge) + text.slice(numIdx + m[1].length);
+        const re = new RegExp(p.source, 'gi');
+        let m;
+        while ((m = re.exec(text)) !== null) {
+            const value = parseInt(m[1], 10);
+            if (!isNaN(value) && value > 0 && value < 200) {
+                const start = m.index + m[0].indexOf(m[1]);
+                matches.push({ value, start, len: m[1].length });
             }
         }
     }
-    return text;
+    return matches;
+}
+
+function messageShowsAge(text, age) {
+    return findAgeMatches(text).some(m => m.value === age);
+}
+
+function replaceSpecificAges(text, oldAge, newAge) {
+    const targets = findAgeMatches(text).filter(m => m.value === oldAge);
+    if (!targets.length) return null;
+    let result = text;
+    for (const m of targets.sort((a, b) => b.start - a.start)) {
+        result = result.slice(0, m.start) + String(newAge) + result.slice(m.start + m.len);
+    }
+    return result;
 }
 
 function onChatCompletionPromptReady(data) {
     try {
+        if (data.dryRun) return;
         const resolved = getResolvedAge();
-        if (!resolved || !resolved.isOverride) return;
+        if (!resolved || !resolved.isOverride) {
+            logOnce('prompt:no-override', 'prompt: skip rewrite (no chat override set)', resolved);
+            return;
+        }
         const ctx = SillyTavern.getContext();
         const userName = ctx.name1;
-        if (!userName) return;
+        if (!userName) {
+            logOnce('prompt:no-user', 'prompt: skip rewrite (no {{user}} name)');
+            return;
+        }
         const defaultAge = findDefaultAgeInText(resolveDefaultPersonaText());
-        if (!defaultAge || defaultAge === resolved.age) return;
-        const personaMsg = data.chat.find(m =>
-            m.role === 'system' &&
-            typeof m.content === 'string' &&
-            m.content.includes(userName) &&
-            findDefaultAgeInText(m.content) === defaultAge
-        );
-        if (!personaMsg) return;
-        const oldText = personaMsg.content;
-        const newText = replaceAgeInText(oldText, resolved.age);
-        if (newText === oldText) return;
-        for (const m of data.chat) {
-            if (typeof m.content === 'string' && m.content.includes(oldText)) {
-                m.content = m.content.replace(oldText, newText);
+        if (!defaultAge || defaultAge === resolved.age) {
+            logOnce(`prompt:default:${defaultAge}`, 'prompt: skip rewrite (default age', defaultAge, '== override', resolved.age, ')');
+            return;
+        }
+        const chat = Array.isArray(data.chat) ? data.chat : [];
+        const withAge = chat.filter(m => typeof m.content === 'string' && messageShowsAge(m.content, defaultAge));
+        const personaCandidates = withAge.filter(m => m.role === 'system' || (typeof m.content === 'string' && m.content.includes(userName)));
+        if (!personaCandidates.length) {
+            logOnce('prompt:no-persona-msg', 'prompt: skip rewrite (no message containing default age', defaultAge, 'found)');
+            return;
+        }
+        let replaced = 0;
+        for (const m of chat) {
+            if (typeof m.content !== 'string') continue;
+            const newContent = replaceSpecificAges(m.content, defaultAge, resolved.age);
+            if (newContent !== null && newContent !== m.content) {
+                m.content = newContent;
+                replaced++;
             }
         }
+        if (!replaced) {
+            logOnce('prompt:no-change', 'prompt: skip rewrite (no age', defaultAge, 'found in persona messages)');
+            return;
+        }
+        logThrottled(1500, `prompt: rewrote`, replaced, 'message(s): age', defaultAge, '->', resolved.age);
     } catch (e) {
-        console.debug('Personage: onChatCompletionPromptReady error', e);
+        console.error('Personage: onChatCompletionPromptReady error', e);
     }
 }
 
@@ -131,6 +196,7 @@ async function promptEditAge() {
         delete ctx.chatMetadata[METADATA_KEY];
         await ctx.saveMetadata();
         refreshAllBadges();
+        log('edit: age override cleared');
         return;
     }
     const n = parseInt(trimmed, 10);
@@ -141,15 +207,22 @@ async function promptEditAge() {
     ctx.chatMetadata[METADATA_KEY] = n;
     await ctx.saveMetadata();
     refreshAllBadges();
+    log('edit: age override set to', n);
 }
 
 function addAgeBadge(messageId) {
     const nameSpan = document.querySelector(`.mes[mesid="${messageId}"] .ch_name .name_text`);
-    if (!nameSpan) return;
+    if (!nameSpan) {
+        logOnce(`badge:no-name:${messageId}`, `badge[${messageId}]: name span not found`);
+        return;
+    }
     const resolved = getResolvedAge();
     let badge = nameSpan.parentElement?.querySelector(`.${BADGE_CLASS}`);
     if (!resolved) {
-        if (badge) badge.remove();
+        if (badge) {
+            badge.remove();
+            logThrottled(1500, 'badge: removed (no age resolved)', `for msg ${messageId}`);
+        }
         return;
     }
     if (!badge) {
@@ -157,6 +230,7 @@ function addAgeBadge(messageId) {
         badge.className = BADGE_CLASS;
         badge.addEventListener('click', promptEditAge);
         nameSpan.insertAdjacentElement('afterend', badge);
+        logThrottled(1500, 'badge: created', `msg ${messageId}`, `age = ${resolved.age}`, resolved.isOverride ? '(override)' : '(from persona)');
     }
     badge.textContent = ` (${resolved.age}${resolved.isOverride ? '*' : ''})`;
     badge.dataset.isOverride = String(resolved.isOverride);
@@ -190,7 +264,7 @@ function init() {
         ctx.eventSource.on(ctx.eventTypes.PERSONA_UPDATED, onPersonaUpdated);
         ctx.eventSource.makeFirst(ctx.eventTypes.CHAT_COMPLETION_PROMPT_READY, onChatCompletionPromptReady);
         setTimeout(refreshAllBadges, 500);
-        console.debug('Personage: initialized');
+        log('init: registered event listeners');
     } catch (error) {
         console.error('Personage: init failed', error);
     }
@@ -206,3 +280,4 @@ if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
 } else {
     document.addEventListener('DOMContentLoaded', init);
 }
+log('personage script loaded');
