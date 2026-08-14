@@ -74,20 +74,34 @@ function findDefaultAgeInText(text) {
     return null;
 }
 
+function getCurrentPersonaOverride() {
+    const ctx = SillyTavern.getContext();
+    const name = ctx.name1 || '';
+    const meta = ctx.chatMetadata?.[METADATA_KEY];
+    let map = {};
+    if (typeof meta === 'number') {
+        map = { [name]: meta };
+    } else if (typeof meta === 'string' && meta.trim() !== '' && !isNaN(parseInt(meta, 10))) {
+        map = { [name]: meta };
+    } else if (meta && typeof meta === 'object') {
+        map = meta;
+    }
+    const v = map?.[name];
+    if (typeof v === 'number') return v;
+    if (typeof v === 'string') {
+        const n = parseInt(v, 10);
+        if (!isNaN(n)) return n;
+    }
+    return null;
+}
+
 function getResolvedAge() {
     try {
         const ctx = SillyTavern.getContext();
-        const override = ctx.chatMetadata?.[METADATA_KEY];
-        if (typeof override === 'number' && override > 0 && override < 200) {
-            logOnce(`override:${override}`, 'resolve: chat override =', override);
+        const override = getCurrentPersonaOverride();
+        if (override !== null && override > 0 && override < 200) {
+            logOnce(`override:${override}`, 'resolve: persona override =', override);
             return { age: override, isOverride: true };
-        }
-        if (typeof override === 'string') {
-            const n = parseInt(override, 10);
-            if (!isNaN(n) && n > 0 && n < 200) {
-                logOnce(`override:${n}`, 'resolve: chat override (string) =', n);
-                return { age: n, isOverride: true };
-            }
         }
         const desc = ctx.powerUserSettings?.persona_description || '';
         if (!desc) {
@@ -182,21 +196,36 @@ function onChatCompletionPromptReady(data) {
     }
 }
 
+function readOverrideMap() {
+    const ctx = SillyTavern.getContext();
+    const meta = ctx.chatMetadata?.[METADATA_KEY];
+    if (typeof meta === 'number') return {};
+    if (typeof meta === 'string' && meta.trim() !== '' && !isNaN(parseInt(meta, 10))) return {};
+    if (meta && typeof meta === 'object') return { ...meta };
+    return {};
+}
+
 async function promptEditAge() {
     const ctx = SillyTavern.getContext();
     const current = getResolvedAge();
     const result = await ctx.Popup.show.input(
         'Edit Persona Age',
-        'Enter age for this chat, or leave empty to reset to default.',
+        `Enter age for this persona, or leave empty to reset it to its default.`,
         current ? String(current.age) : '',
     );
     if (result === null) return;
+    const map = readOverrideMap();
     const trimmed = result.trim();
     if (!trimmed) {
-        delete ctx.chatMetadata[METADATA_KEY];
+        delete map[ctx.name1];
+        if (Object.keys(map).length) {
+            ctx.chatMetadata[METADATA_KEY] = map;
+        } else {
+            delete ctx.chatMetadata[METADATA_KEY];
+        }
         await ctx.saveMetadata();
         refreshAllBadges();
-        log('edit: age override cleared');
+        log('edit: age override cleared for persona', ctx.name1);
         return;
     }
     const n = parseInt(trimmed, 10);
@@ -204,10 +233,11 @@ async function promptEditAge() {
         toastr.warning('Please enter a valid age (1-199).');
         return;
     }
-    ctx.chatMetadata[METADATA_KEY] = n;
+    map[ctx.name1] = n;
+    ctx.chatMetadata[METADATA_KEY] = map;
     await ctx.saveMetadata();
     refreshAllBadges();
-    log('edit: age override set to', n);
+    log('edit: age override set to', n, 'for persona', ctx.name1);
 }
 
 function addAgeBadge(messageId) {
@@ -236,7 +266,45 @@ function addAgeBadge(messageId) {
     badge.dataset.isOverride = String(resolved.isOverride);
 }
 
+function addPersonaPanelBadge() {
+    const nameEl = document.querySelector('#persona_controls .persona_name');
+    if (!nameEl) {
+        logOnce('panel:no-name', 'panel: persona name element not found');
+        return;
+    }
+    const resolved = getResolvedAge();
+    let badge = nameEl.querySelector(`.${BADGE_CLASS}`);
+    if (!resolved) {
+        if (badge) {
+            badge.remove();
+            logThrottled(1500, 'panel: removed badge (no age resolved)');
+        }
+        return;
+    }
+    if (!badge) {
+        badge = document.createElement('span');
+        badge.className = BADGE_CLASS;
+        badge.addEventListener('click', promptEditAge);
+        nameEl.appendChild(badge);
+        logThrottled(1500, 'panel: badge created', `age = ${resolved.age}`, resolved.isOverride ? '(override)' : '(from persona)');
+    }
+    const label = ` (${resolved.age}${resolved.isOverride ? '*' : ''})`;
+    if (badge.textContent !== label) badge.textContent = label;
+    if (badge.dataset.isOverride !== String(resolved.isOverride)) badge.dataset.isOverride = String(resolved.isOverride);
+}
+
+function watchPersonaNameForBadge() {
+    const nameEl = document.querySelector('#persona_controls .persona_name');
+    if (!nameEl) {
+        logOnce('panel:no-name-el', 'watch: persona name element not found');
+        return;
+    }
+    new MutationObserver(() => addPersonaPanelBadge()).observe(nameEl, { childList: true, characterData: true, subtree: true });
+    log('watch: observing persona name element');
+}
+
 function refreshAllBadges() {
+    addPersonaPanelBadge();
     document.querySelectorAll('.mes[is_user="true"]').forEach(mes => {
         const mid = mes.getAttribute('mesid');
         if (mid !== null) addAgeBadge(mid);
@@ -263,6 +331,7 @@ function init() {
         ctx.eventSource.on(ctx.eventTypes.PERSONA_CHANGED, onChatChanged);
         ctx.eventSource.on(ctx.eventTypes.PERSONA_UPDATED, onPersonaUpdated);
         ctx.eventSource.makeFirst(ctx.eventTypes.CHAT_COMPLETION_PROMPT_READY, onChatCompletionPromptReady);
+        watchPersonaNameForBadge();
         setTimeout(refreshAllBadges, 500);
         log('init: registered event listeners');
     } catch (error) {
